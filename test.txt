@@ -1,0 +1,120 @@
+# 1. Check current SELinux enforcement mode and policy type
+sestatus
+# ✅ Shows runtime SELinux state (Enforcing/Permissive/Disabled), loaded policy type, policy name.
+# 📄 Useful to confirm whether SELinux is active and under which policy (e.g., targeted, mls).
+
+# 2. Check SELinux boot-time configuration
+cat /etc/selinux/config
+# ✅ Shows persistent SELinux mode and policy type set at boot.
+# 📄 Important because a system could be permissive now but configured to enforce after reboot.
+
+# 3. List all currently loaded SELinux policy modules
+semodule -l
+# ✅ Lists all installed policy modules (both base and custom modules).
+# 📄 Helps track which policy modules are loaded and would need to be replicated.
+
+# 4. Export full compiled SELinux policy
+semodule -E -b /etc/selinux/targeted/base.pp -o /root/full_policy.pp
+# ✅ Dumps full active compiled policy (all modules combined) into one file.
+# 📄 Essential for migrating full SELinux policy to another server.
+
+# 5. List SELinux booleans in a format that can be reused for replication
+getsebool -a | awk '{print "setsebool -P " $1 " " $3}'
+# ✅ Lists all SELinux booleans and outputs commands to reapply their states.
+# 📄 Needed to ensure custom boolean states (e.g., httpd_can_network_connect) are restored.
+
+# 6. List only custom file context rules
+semanage fcontext -C
+# ✅ Shows only manually-added file context rules (overrides).
+# 📄 Avoids dumping default rules, focuses on custom changes that must be migrated.
+
+# 7. List all SELinux port mappings
+semanage port -l
+# ✅ Lists ports assigned to specific SELinux types.
+# 📄 Critical if services run on non-default ports (e.g., Apache on port 8080).
+
+# 8. List all SELinux interface mappings
+semanage interface -l
+# ✅ Lists network interfaces and their SELinux labels.
+# 📄 Useful when special labelling is applied to network devices.
+
+# 9. List all SELinux login mappings
+semanage login -l
+# ✅ Shows Linux user → SELinux user mappings.
+# 📄 Needed to replicate user mappings (especially if non-default users have custom SELinux roles).
+
+# 10. Search SELinux policy for processes allowed to execute memory
+sesearch --allow -c process -p execmem
+# ✅ Lists which SELinux domains are allowed to allocate executable memory (execmem).
+# 📄 Important for security auditing and replication.
+
+# 11. Search SELinux policy for processes allowed to execute code on the stack
+sesearch --allow -c process -p execstack
+# ✅ Lists SELinux domains allowed to execute stack memory (execstack).
+# 📄 Important because it's often a security risk.
+
+# 12. Search SELinux policy for processes allowed to execute code from the heap
+sesearch --allow -c process -p execheap
+# ✅ Lists SELinux domains allowed to execute heap memory (execheap).
+# 📄 Important to maintain or tighten security during replication.
+
+# 13. List current processes with their SELinux contexts
+ps -eZ
+# ✅ Lists all running processes alongside their SELinux context labels.
+# 📄 Helps verify active domains, and can help in troubleshooting differences on the new system.
+
+
+
+
+| Command | SELinux Audit Log (`/var/log/audit/audit.log`) | General Syslog (`/var/log/messages`) | Journald (`journalctl`) | Notes |
+|--------|--------------------------------------------------|--------------------------------------|--------------------------|-------|
+| `sestatus` | ❌ No | ❌ No | ❌ No | Purely reads kernel SELinux status. No logging at any layer. |
+| `cat /etc/selinux/config` | ❌ No | ❌ No | ❌ No | Standard file read. Does not trigger any logging. |
+| `semodule -l` | ❌ No | ❌ No | ❌ No | Reads module list. Not logged. |
+| `semodule -E -b ... -o ...` | ❌ No | ❌ No | ❌ No | Dumps compiled policy to file. No system impact. |
+| `getsebool -a | awk ...` | ❌ No | ❌ No | ❌ No | Just reads booleans and formats them. No logging unless `setsebool` is executed. |
+| `semanage fcontext -C` | ❌ No | ❌ No | ❌ No | Lists only local changes. No system logging. |
+| `semanage port -l` | ❌ No | ❌ No | ❌ No | Read-only. Queries policy database. |
+| `semanage interface -l` | ❌ No | ❌ No | ❌ No | Same as above. |
+| `semanage login -l` | ❌ No | ❌ No | ❌ No | Same. No D-Bus or system log traffic. |
+| `sesearch --allow ...` | ❌ No | ❌ No | ❌ No | Queries binary policy database. Not a system action. |
+| `ps -eZ` | ❌ No | ❌ No | ❌ No | Reads process table. No auditd or journald interaction. |
+| `find / -printf ... | ls -Z` (optional) | ❌ No | ❌ No | ❌ No (but see note) | Heavy read operation. May trigger **I/O load**, but not logging — unless a denied file read happens (e.g., due to filesystem permissions, not SELinux). |
+
+
+
+current commands do not trigger any logs unless:
+
+    They are attempting a policy violation
+
+    Or you manually follow them with state-changing commands
+
+For example:
+
+    setsebool does get logged.
+
+    Denied accesses triggered as a side-effect of an action (e.g. running a binary that needs execmem) will be logged in /var/log/audit/audit.log or /var/log/messages.
+
+ Primary SELinux Logs:
+
+    /var/log/audit/audit.log (if auditd is running)
+
+    /var/log/messages (fallback for AVC denials if auditd is not active)
+
+SELinux-related logs appear as:
+
+type=AVC msg=audit(123456789.123:123): avc:  denied  { execmem } for  pid=1234 ...
+
+Side Notes on auditd and Logging
+
+    The auditd daemon captures all SELinux events (AVC denials, policy load, boolean changes).
+
+    It does not log reads or queries (like semanage -l or sestatus).
+
+    It will log:
+
+        Changes to booleans via setsebool
+
+        Module loads/removals (semodule -i, -r)
+
+        Policy violations (e.g. when a domain attempts unauthorised execstack)
